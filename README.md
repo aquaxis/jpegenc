@@ -1,79 +1,152 @@
-# JPEG Encoder - シミュレーションガイド
+# JPEG Encoder - FPGA Baseline JPEG Encoder
 
-## 1. 概要
-
-SystemVerilogで実装されたFPGAベースラインJPEGエンコーダのシミュレーション環境。Icarus Verilog (iverilog) を使用して全モジュールのユニットテスト、統合テスト、及びBMPファイル入出力テストを実行できる。
+SystemVerilogで実装されたFPGAベースラインJPEGエンコーダー。RGB画像をリアルタイムにJPEG圧縮し、JFIF準拠のバイトストリームを出力する。
 
 Dual Processing Pipeline アーキテクチャにより、4:2:0モードで **1.53 clk/px** (0.652 px/clk) を達成。FHD 1920x1088 @250MHz で推定 **~78 fps** (60fps目標を30%マージンで達成)。全59テスト ALL PASS。
 
 ---
 
-## 2. ファイル構成
+## 目次
+
+- [1. 概要](#1-概要)
+- [2. 特徴](#2-特徴)
+- [3. 性能](#3-性能)
+- [4. ファイル構造](#4-ファイル構造)
+- [5. 必要な環境](#5-必要な環境)
+- [6. 使用方法](#6-使用方法)
+- [7. アーキテクチャ](#7-アーキテクチャ)
+- [8. モジュール一覧](#8-モジュール一覧)
+- [9. テスト結果](#9-テスト結果)
+- [10. テストBMP画像の仕様](#10-テストbmp画像の仕様)
+- [11. トラブルシューティング](#11-トラブルシューティング)
+- [12. シミュレータの選択](#12-シミュレータの選択)
+- [13. ライセンス](#13-ライセンス)
+
+---
+
+## 目的
+
+本プロジェクトは、低レイテンシかつ高スループットなハードウェアJPEGエンコーダーをSystemVerilogで実現することを目的としています。FPGAでのリアルタイム画像圧縮に最適化されたアーキテクチャを提供し、AXI4-Streamインターフェースによる標準的な接続性を実現します。
+
+---
+
+## 1. 概要
+
+### 主要スペック
+
+| 項目 | 仕様 |
+|------|------|
+| 言語 | SystemVerilog (IEEE 1800-2012) |
+| 規格準拠 | ITU-T T.81 (Baseline JPEG), JFIF 1.01 |
+| 色空間 | YCbCr 4:4:4 / 4:2:0 (BT.601) |
+| コンポーネント数 | 1 (Y単色) または 3 (YCbCr) |
+| 最大画像サイズ | 4096 x 4096 ピクセル |
+| 入力インタフェース | AXI4-Stream (32-bit A8R8G8B8) |
+| 出力インタフェース | AXI4-Stream (8-bit JPEGバイトストリーム) |
+| バックプレッシャ | 全パイプライン段で完全対応 |
+| シミュレータ | Icarus Verilog 12.x / Verilator |
+
+---
+
+## 2. 特徴
+
+- **Dual Processing Pipeline アーキテクチャ** - 2系統並列DCT処理により高解像度画像のリアルタイムエンコードを実現。Phase 5最適化で従来比4.25倍の高速化を達成。
+- **YCbCr 4:4:4 / 4:2:0 クロマサブサンプリング対応** - 4:2:0モードでデータ量50%削減、処理速度約3.3倍向上。帯域制約のある映像アプリケーションに最適。
+- **AXI4-Stream インターフェース** - バックプレッシャ完全対応の標準インターフェース。他のIPコアとの接続やシステムへの組み込みが容易。
+- **JFIF 1.01 準拠ヘッダ自動生成** - SOI, APP0, DQT, SOF0, DHT, SOS, EOIを自動生成。標準的な画像ビューアで表示可能。
+- **ITU-T.81 標準量子化・Huffmanテーブル** - Quality 50 標準テーブル内蔵。高画質と圧縮率のバランスを実現。
+- **iverilog / Verilator 互換** - オープンソースツールで検証可能。商用ツールへの移植も容易。
+
+---
+
+## 3. 性能
+
+### 3.1 スループット比較
+
+| モード | clk/pixel | pixels/clock | FHD @250MHz |
+|--------|-----------|--------------|-------------|
+| 4:4:4 | ~4.99 | 0.200 | ~24 fps |
+| **4:2:0** | **~1.53** | **0.652** | **~78 fps** |
+
+### 3.2 Phase別性能推移
+
+| Phase | 4:4:4 clk/px | 4:2:0 clk/px | 主な最適化 |
+|-------|--------------|--------------|-----------|
+| Phase 3 (ベースライン) | ~55.7 | ~29.0 | 基本パイプライン |
+| Phase 4 | ~11.0 | ~6.5 | DCT並列化+ダブルバッファ+zigzag統合 |
+| **Phase 5** | **~4.99** | **~1.53** | Dual Pipeline+Col/Output Overlap+DB RLE |
+
+**Phase 3→5 合計改善: 4:2:0で19.0倍高速化** (29.0 → 1.53 clk/px)
+
+### 3.3 リアルタイム性能 (4:2:0モード)
+
+| 画像サイズ | @100MHz | @150MHz | @200MHz | @250MHz |
+|-----------|---------|---------|---------|---------|
+| 64 x 64 | 3,784 fps | 5,676 fps | 7,568 fps | 9,460 fps |
+| 256 x 256 | 235 fps | 353 fps | 470 fps | 588 fps |
+| 640 x 480 (VGA) | ~54 fps | ~80 fps | ~107 fps | ~134 fps |
+| 1280 x 720 (HD) | 16.6 fps | 24.9 fps | **33.2 fps** | 41.5 fps |
+| 1920 x 1080 (FHD) | ~7.4 fps | ~11.1 fps | ~14.8 fps | **~78 fps** |
+
+詳細は [docs/performance.md](docs/performance.md) を参照。
+
+---
+
+## 4. ファイル構造
 
 ```
 jpegenc/layers/
-├── rtl/                              RTLソースコード
-│   ├── jpeg_encoder_pkg.sv           共有パッケージ（定数・型・テーブル・関数）
-│   ├── jpeg_encoder_top.sv           トップレベル統合モジュール (Dual Pipeline)
-│   ├── rgb2ycbcr.sv                  RGB→YCbCr色空間変換
-│   ├── block_splitter.sv             ラスタ→8x8ブロック順変換 (4:4:4用)
-│   ├── block_splitter_420.sv         ラスタ→MCUブロック分割 (4:2:0用、ダウンサンプリング内蔵)
-│   ├── block_distributor.sv          Dual Pipeline ブロック分配 (1→2 demux)
-│   ├── dct_2d.sv                     2次元DCT (8並列乗算+ジグザグ出力統合)
-│   ├── quantizer.sv                  DCT係数量子化
-│   ├── output_merger.sv              Dual Pipeline 出力マージ (2→1 merge)
-│   ├── zigzag_scan.sv                ジグザグ走査順並べ替え (※DCTに統合済み、未使用)
-│   ├── rle_encoder.sv                ランレングス符号化 + DC DPCM (ダブルバッファリング)
-│   ├── huffman_encoder.sv            Huffmanエントロピー符号化
-│   └── bitstream_assembler.sv        ビットパッキング + JFIFヘッダ
+├── rtl/                              # RTLソースコード
+│   ├── jpeg_encoder_pkg.sv           # 共有パッケージ（定数・型・テーブル・関数）
+│   ├── jpeg_encoder_top.sv           # トップレベル統合モジュール (Dual Pipeline)
+│   ├── rgb2ycbcr.sv                  # RGB→YCbCr色空間変換
+│   ├── block_splitter.sv             # ラスタ→8x8ブロック順変換 (4:4:4用)
+│   ├── block_splitter_420.sv         # ラスタ→MCUブロック分割 (4:2:0用)
+│   ├── block_distributor.sv          # Dual Pipeline ブロック分配 (1→2 demux)
+│   ├── dct_2d.sv                     # 2次元DCT (8並列乗算+ジグザグ出力統合)
+│   ├── quantizer.sv                  # DCT係数量子化
+│   ├── output_merger.sv              # Dual Pipeline 出力マージ (2→1 merge)
+│   ├── zigzag_scan.sv                # ジグザグ走査順並べ替え (※DCTに統合済み)
+│   ├── rle_encoder.sv                # ランレングス符号化 + DC DPCM
+│   ├── huffman_encoder.sv            # Huffmanエントロピー符号化
+│   └── bitstream_assembler.sv        # ビットパッキング + JFIFヘッダ
 │
-├── tb/                               テストベンチ
-│   ├── tb_common/                    共通テストベンチインフラ
-│   │   ├── test_utils.sv             テストユーティリティ
-│   │   ├── axi_stream_driver.sv      AXI4-Streamマスタドライバ
-│   │   ├── axi_stream_monitor.sv     AXI4-Streamモニタ
-│   │   └── axi_stream_slave.sv       AXI4-Streamスレーブ（バックプレッシャ対応）
-│   ├── tb_rgb2ycbcr.sv               RGB→YCbCr変換テスト
-│   ├── tb_dct_2d.sv                  2D-DCTテスト
-│   ├── tb_quantizer.sv               量子化テスト
-│   ├── tb_zigzag_scan.sv             ジグザグ走査テスト
-│   ├── tb_rle_encoder.sv             RLE符号化テスト
-│   ├── tb_huffman_encoder.sv         Huffman符号化テスト
-│   ├── tb_block_splitter.sv          ブロック分割テスト
-│   ├── tb_bitstream_assembler.sv     ビットストリーム組立テスト
-│   ├── tb_jpeg_encoder_top.sv        トップレベル統合テスト (4:4:4)
-│   ├── tb_jpeg_encoder_top_420.sv    トップレベル統合テスト (4:2:0)
-│   ├── tb_block_splitter_420.sv      4:2:0ブロック分割テスト
-│   ├── tb_bitstream_assembler_420.sv 4:2:0ビットストリーム組立テスト
-│   ├── tb_jpeg_perf.sv               パフォーマンス計測テスト
-│   └── tb_jpeg_encoder_bmp.sv        BMP入出力エンドツーエンドテスト
+├── tb/                               # テストベンチ
+│   ├── tb_common/                    # 共通テストベンチインフラ
+│   │   ├── test_utils.sv             # テストユーティリティ
+│   │   ├── axi_stream_driver.sv      # AXI4-Streamマスタドライバ
+│   │   ├── axi_stream_monitor.sv     # AXI4-Streamモニタ
+│   │   └── axi_stream_slave.sv       # AXI4-Streamスレーブ
+│   ├── tb_rgb2ycbcr.sv               # RGB→YCbCr変換テスト
+│   ├── tb_dct_2d.sv                  # 2D-DCTテスト
+│   ├── tb_quantizer.sv               # 量子化テスト
+│   ├── tb_zigzag_scan.sv             # ジグザグ走査テスト
+│   ├── tb_rle_encoder.sv             # RLE符号化テスト
+│   ├── tb_huffman_encoder.sv         # Huffman符号化テスト
+│   ├── tb_block_splitter.sv          # ブロック分割テスト
+│   ├── tb_bitstream_assembler.sv     # ビットストリーム組立テスト
+│   ├── tb_jpeg_encoder_top.sv        # トップレベル統合テスト (4:4:4)
+│   ├── tb_jpeg_encoder_top_420.sv    # トップレベル統合テスト (4:2:0)
+│   ├── tb_block_splitter_420.sv      # 4:2:0ブロック分割テスト
+│   ├── tb_bitstream_assembler_420.sv # 4:2:0ビットストリーム組立テスト
+│   ├── tb_jpeg_perf.sv               # パフォーマンス計測テスト
+│   └── tb_jpeg_encoder_bmp.sv        # BMP入出力エンドツーエンドテスト
 │
-├── sim/                              シミュレーション環境
-│   ├── Makefile                      ビルド・テスト自動化
-│   ├── run_sim.sh                    シミュレーション実行スクリプト
-│   ├── generate_test_bmp.py          テストBMP画像生成スクリプト
-│   └── test_images/                  テストBMPファイル（10ファイル）
-│       ├── test_8x8_gradient.bmp     8x8 カラーグラデーション
-│       ├── test_8x8_white.bmp        8x8 ソリッドホワイト
-│       ├── test_8x8_red.bmp          8x8 ソリッドレッド
-│       ├── test_8x8_black.bmp        8x8 ソリッドブラック
-│       ├── test_16x16_gradient.bmp   16x16 カラーグラデーション
-│       ├── test_16x16_checker.bmp    16x16 チェッカーボード
-│       ├── test_16x8_gradient.bmp    16x8 非正方形グラデーション
-│       ├── test_32x32_gradient.bmp   32x32 カラーグラデーション
-│       ├── test_32x32_rainbow.bmp    32x32 レインボーバー
-│       └── test_64x64_gradient.bmp   64x64 カラーグラデーション
+├── sim/                              # シミュレーション環境
+│   ├── Makefile                      # ビルド・テスト自動化
+│   ├── run_sim.sh                    # シミュレーション実行スクリプト
+│   ├── generate_test_bmp.py          # テストBMP画像生成スクリプト
+│   └── test_images/                  # テストBMPファイル
 │
-└── docs/                             ドキュメント
-    ├── spec.md                       仕様書・モジュール詳細
-    ├── README.md                     本ドキュメント
-    ├── performance.md                パフォーマンスレポート (Phase 3-5)
-    └── verification_plan.md          検証計画
+└── docs/                             # ドキュメント
+    ├── spec.md                       # 仕様書・モジュール詳細
+    ├── performance.md                # パフォーマンスレポート
+    └── verification_plan.md          # 検証計画
 ```
 
 ---
 
-## 3. 必要な環境
+## 5. 必要な環境
 
 | ツール | バージョン | 用途 |
 |--------|-----------|------|
@@ -83,11 +156,28 @@ jpegenc/layers/
 | GTKWave | (任意) | 波形ビューア |
 | Make | GNU Make | ビルド自動化 |
 
+### インストール
+
+```bash
+# Ubuntu/Debian
+sudo apt install iverilog python3
+
+# macOS (Homebrew)
+brew install icarus-verilog python3
+```
+
 ---
 
-## 4. シミュレーション方法
+## 6. 使用方法
 
-### 4.1 全テスト実行
+### 6.1 ダウンロード
+
+```bash
+git clone <repository_url>
+cd jpegenc/layers
+```
+
+### 6.2 全テスト実行
 
 ```bash
 cd sim
@@ -100,7 +190,7 @@ make test_all
 - 4:2:0モードのテスト（block_splitter_420, bitstream_assembler_420, jpeg_encoder_top_420）
 - 合計: **59テスト**
 
-### 4.2 個別モジュールテスト
+### 6.3 個別モジュールテスト
 
 ```bash
 cd sim
@@ -118,94 +208,46 @@ make test_<モジュール名>
 
 # 例: DCTモジュールのテスト
 make test_dct_2d
-
-# 例: トップレベル統合テスト
-make test_jpeg_encoder_top
 ```
 
-### 4.3 パフォーマンステスト
+### 6.4 パフォーマンステスト
 
 ```bash
 cd sim
 
 # === 4:4:4 モード ===
-# 特定サイズのパフォーマンステスト
 make test_perf PERF_W=256 PERF_H=256 PERF_COMP=3
 
-# Full HD テスト (所要時間: iverilogで約15分)
-make test_perf PERF_W=1920 PERF_H=1080 PERF_COMP=3
-
 # === 4:2:0 モード (画像サイズは16の倍数が必須) ===
-# 4:2:0 VGA テスト
-make test_perf_420 PERF_W=640 PERF_H=480 PERF_COMP=3
-
-# 4:2:0 HD テスト
-make test_perf_420 PERF_W=1280 PERF_H=720 PERF_COMP=3
-
-# 4:2:0 512x512 テスト (Phase 5 最速計測に使用)
 make test_perf_420 PERF_W=512 PERF_H=512 PERF_COMP=3
 ```
 
-テストベンチ `tb_jpeg_perf.sv` がグラデーション画像をオンザフライ生成し、入力/出力/合計のクロック数を計測する。Back-to-back streaming方式で`tvalid`を連続アサートし、パイプラインの真性能を計測する。
-
-詳細な結果は `docs/performance.md` を参照。
-
-### 4.4 BMP入出力テスト
-
-#### テストBMP画像の生成
+### 6.5 BMP入出力テスト
 
 ```bash
 cd sim
+
+# テストBMP生成
 make gen_test_bmp
-```
 
-Python 3 の `generate_test_bmp.py` が `test_images/` ディレクトリに10種類のテストBMPを生成する。
-
-#### クイックテスト（8x8グラデーション）
-
-```bash
+# クイックテスト（8x8グラデーション）
 make test_bmp_quick
-```
 
-テストBMP生成 + 8x8グラデーション画像のエンコードテストを実行する。
-
-#### カスタムパラメータでのテスト
-
-```bash
-make test_bmp IMG_W=<幅> IMG_H=<高さ> NUM_COMP=<成分数> \
-    BMP_FILE=<入力BMPパス> JPEG_FILE=<出力JPEGパス>
-```
-
-**パラメータ一覧:**
-
-| パラメータ | デフォルト | 説明 |
-|-----------|-----------|------|
-| `IMG_W` | 8 | 画像幅（8の倍数） |
-| `IMG_H` | 8 | 画像高さ（8の倍数） |
-| `NUM_COMP` | 3 | コンポーネント数 (1 or 3) |
-| `BMP_FILE` | `test_images/test_8x8_gradient.bmp` | 入力BMPファイル |
-| `JPEG_FILE` | `output_8x8.jpg` | 出力JPEGファイル |
-
-**使用例:**
-
-```bash
-# 64x64 グラデーション画像のエンコード
+# カスタムパラメータでのテスト
 make test_bmp IMG_W=64 IMG_H=64 NUM_COMP=3 \
     BMP_FILE=test_images/test_64x64_gradient.bmp \
     JPEG_FILE=output_64x64.jpg
-
-# 32x32 レインボーバー画像のエンコード
-make test_bmp IMG_W=32 IMG_H=32 NUM_COMP=3 \
-    BMP_FILE=test_images/test_32x32_rainbow.bmp \
-    JPEG_FILE=output_32x32_rainbow.jpg
-
-# 16x16 チェッカーボード画像のエンコード
-make test_bmp IMG_W=16 IMG_H=16 NUM_COMP=3 \
-    BMP_FILE=test_images/test_16x16_checker.bmp \
-    JPEG_FILE=output_16x16_checker.jpg
 ```
 
-### 4.5 波形表示
+### 6.6 テスト結果レポート
+
+```bash
+make report
+```
+
+各モジュールのログファイルからPASS/FAIL結果を集計して表示。
+
+### 6.7 波形表示
 
 ```bash
 # テスト実行後、VCDファイルが生成される
@@ -215,27 +257,137 @@ make wave_<モジュール名>
 make wave_dct_2d
 ```
 
-GTKWaveが起動し、波形ファイル (`tb_<モジュール名>.vcd`) を表示する。
+GTKWaveが起動し、波形ファイル (`tb_<モジュール名>.vcd`) を表示。
 
-### 4.6 テスト結果レポート
-
-```bash
-make report
-```
-
-各モジュールのログファイルからPASS/FAIL結果を集計して表示する。
-
-### 4.7 クリーンアップ
+### 6.8 クリーンアップ
 
 ```bash
 make clean
 ```
 
-コンパイル済みバイナリ (`sim_*`)、波形ファイル (`*.vcd`)、ログファイル (`log_*.txt`)、出力JPEGファイル (`*.jpg`) を削除する。
+コンパイル済みバイナリ、波形ファイル、ログファイル、出力JPEGファイルを削除。
 
 ---
 
-## 5. テストBMP画像の仕様
+## 7. アーキテクチャ
+
+### 7.1 パイプライン構成
+
+```
+入力ピクセル (A8R8G8B8, 32-bit)
+    │
+    ▼
+[Stage 1] rgb2ycbcr ── RGB→YCbCr変換 (BT.601)
+    │            24-bit {Y, Cb, Cr}
+    ▼
+[Stage 1.5] block_splitter / block_splitter_420 ── ラスタ→ブロック変換
+    │            24-bit {Y, Cb, Cr}
+    ▼
+[Stage 2] Component Mux ── コンポーネント分離・MCU順序化
+    │            8-bit 単成分
+    ▼
+[Stage 3] block_distributor ── Dual Pipeline ブロック分配 (1→2 demux)
+    │            8-bit 単成分 × 2系統
+    ▼
+    ┌─────────────────────┬─────────────────────┐
+    │  Pipeline A         │  Pipeline B         │
+    │                     │                     │
+    │ [Stage 4A] dct_2d   │ [Stage 4B] dct_2d  │ ── 2D-DCT (128cy/blk)
+    │    16-bit signed    │    16-bit signed    │
+    │        ▼            │        ▼            │
+    │ [Stage 5A] quantizer│ [Stage 5B] quantizer│ ── 量子化
+    │    12-bit signed    │    12-bit signed    │
+    │                     │                     │
+    └──────────┬──────────┴──────────┬─────────┘
+               │                      │
+               ▼                      ▼
+[Stage 6] output_merger ── Dual Pipeline 出力マージ (2→1 merge)
+    │            12-bit signed 量子化係数 (ジグザグ順)
+    ▼
+[Stage 7] rle_encoder ── ランレングス符号化 + DC DPCM
+    │            16-bit {zero_run, value}
+    ▼
+[Stage 8] huffman_encoder ── Huffmanエントロピー符号化
+    │            32-bit {code_length, codeword}
+    ▼
+[Stage 9] bitstream_assembler ── ビットパッキング + JFIFヘッダ
+    │            8-bit JPEGバイトストリーム
+    ▼
+出力 JPEG ファイル
+```
+
+### 7.2 各ステージの役割
+
+| ステージ | モジュール | 機能 | 遅延 |
+|----------|-----------|------|------|
+| 1 | rgb2ycbcr | RGB→YCbCr変換 (BT.601) | 3サイクル |
+| 1.5 | block_splitter | ラスタ→8x8ブロック変換 | 8行ラインバッファ |
+| 2 | Component Mux | コンポーネント分離 (Y→Cb→Cr) | 1ブロック |
+| 3 | block_distributor | Dual Pipeline分配 | 1サイクル |
+| 4 | dct_2d (x2) | 2D-DCT (並列処理) | 128サイクル/ブロック |
+| 5 | quantizer (x2) | 量子化 | 1サイクル/係数 |
+| 6 | output_merger | 出力マージ (2→1) | 1サイクル |
+| 7 | rle_encoder | RLE + DC DPCM | 可変長 |
+| 8 | huffman_encoder | Huffman符号化 | 可変長 |
+| 9 | bitstream_assembler | JFIF出力 | 可変長 |
+
+---
+
+## 8. モジュール一覧
+
+| モジュール | 機能 | 詳細 |
+|-----------|------|------|
+| jpeg_encoder_top | トップレベル統合 | [spec.md](docs/spec.md#31-jpeg_encoder_top) 参照 |
+| rgb2ycbcr | RGB→YCbCr変換 | [spec.md](docs/spec.md#32-rgb2ycbcr) 参照 |
+| block_splitter | ラスタ→ブロック変換 (4:4:4) | [spec.md](docs/spec.md#34-block_splitter) 参照 |
+| block_splitter_420 | ブロック分割 (4:2:0) | [spec.md](docs/spec.md#34-block_splitter) 参照 |
+| block_distributor | Dual Pipeline分配 | [spec.md](docs/spec.md#311-block_distributor) 参照 |
+| dct_2d | 2次元DCT | [spec.md](docs/spec.md#35-dct_2d) 参照 |
+| quantizer | 量子化 | [spec.md](docs/spec.md#36-quantizer) 参照 |
+| output_merger | 出力マージ | [spec.md](docs/spec.md#312-output_merger) 参照 |
+| rle_encoder | RLE符号化 | [spec.md](docs/spec.md#38-rle_encoder) 参照 |
+| huffman_encoder | Huffman符号化 | [spec.md](docs/spec.md#39-huffman_encoder) 参照 |
+| bitstream_assembler | JFIF出力 | [spec.md](docs/spec.md#310-bitstream_assembler) 参照 |
+
+---
+
+## 9. テスト結果
+
+### 9.1 ユニットテストサマリ
+
+| モジュール | テスト数 | 結果 |
+|-----------|---------|------|
+| rgb2ycbcr | 4 | PASS |
+| dct_2d | 4 | PASS |
+| quantizer | 4 | PASS |
+| zigzag_scan | 4 | PASS |
+| rle_encoder | 5 | PASS |
+| huffman_encoder | 4 | PASS |
+| block_splitter | 6 | PASS |
+| bitstream_assembler | 4 | PASS |
+| jpeg_encoder_top | 11 | PASS |
+| block_splitter_420 | 6 | PASS |
+| bitstream_assembler_420 | 2 | PASS |
+| jpeg_encoder_top_420 | 5 | PASS |
+| **合計** | **59** | **ALL PASS** |
+
+### 9.2 画質テスト結果
+
+| テスト画像 | MaxDiff | MeanDiff | PSNR |
+|-----------|---------|----------|------|
+| 8x8 gradient | 18 | 5.08 | 32.0 dB |
+| 8x8 white | 1 | 1.00 | 48.1 dB |
+| 16x16 gradient | 15 | 3.55 | 34.8 dB |
+| 32x32 gradient | 10 | 2.67 | 37.6 dB |
+| 64x64 gradient | 10 | 2.46 | 38.4 dB |
+
+全テストでMaxDiff ≤ 18（JPEG Q50の量子化誤差範囲内）、PSNR 32.0～48.1 dB（標準的なJPEG品質）。
+
+詳細は [docs/verification_plan.md](docs/verification_plan.md) を参照。
+
+---
+
+## 10. テストBMP画像の仕様
 
 `generate_test_bmp.py` で生成されるテストBMPファイル:
 
@@ -256,48 +408,7 @@ BMPフォーマット: 24-bit Windows BMP (BITMAPINFOHEADER, BI_RGB, bottom-up)
 
 ---
 
-## 6. テスト結果の見方
-
-### 6.1 ユニットテスト
-
-各テストベンチは `$display` で結果を出力する。ログファイルは `sim/log_<モジュール名>.txt` に保存される。
-
-```
-[PASS] テスト名 - 説明
-[FAIL] テスト名 - 説明
-```
-
-### 6.2 BMP入出力テスト
-
-テストベンチ (`tb_jpeg_encoder_bmp.sv`) は以下を出力する:
-
-1. **エンコード結果**: 出力JPEGファイルのバイト数
-2. **品質比較**: 入力画像とJPEGデコード画像の差分
-   - **MaxDiff**: 全ピクセルの最大差分値
-   - **MeanDiff**: 全ピクセルの平均差分値
-   - **PSNR**: ピーク信号対雑音比 (dB)
-
-JPEG Q50（標準品質）での期待値:
-- MaxDiff ≤ 20 程度
-- PSNR ≥ 30 dB
-
----
-
-## 7. シミュレータの選択
-
-デフォルトではIcarus Verilog (`iverilog`) を使用するが、Verilator も選択可能:
-
-```bash
-# Icarus Verilog (デフォルト)
-make test_all SIM_TOOL=iverilog
-
-# Verilator
-make test_all SIM_TOOL=verilator
-```
-
----
-
-## 8. トラブルシューティング
+## 11. トラブルシューティング
 
 ### iverilog が見つからない
 
@@ -323,220 +434,29 @@ sudo apt install python3
 
 ### 出力JPEGファイルが正しく表示されない
 
-<<<<<<< HEAD
 - 画像ビューアがベースラインJPEGに対応しているか確認
 - `hexdump -C output.jpg | head` でSOIマーカー (FF D8) とEOIマーカー (FF D9) が存在するか確認
-=======
-- `--to` : 送信先エージェント（必須）
-- `--type` : メッセージタイプ（instruction, report, question, answer, status, error, complete）（必須）
-- `--message` : メッセージ本文（必須）
-- `--from` : 送信者名（デフォルト: coo）
-- `--priority` : 優先度（low, normal, high, urgent）（デフォルト: normal）
 
-### 監視モード
+---
+
+## 12. シミュレータの選択
+
+デフォルトではIcarus Verilog (`iverilog`) を使用するが、Verilator も選択可能:
 
 ```bash
-pnpm run monitor
+# Icarus Verilog (デフォルト)
+make test_all SIM_TOOL=iverilog
+
+# Verilator
+make test_all SIM_TOOL=verilator
 ```
 
-バックグラウンドでエージェントの正常性を監視し、異常検出時にログを出力します。Ctrl+Cで終了。
+---
 
-### リアルタイム実行状況表示
+## 13. ライセンス
 
-```bash
-pnpm run live
-```
+MIT License
 
-全14エージェントの実行状況をターミナル上にダッシュボード形式で表示します。一定間隔（デフォルト3秒）で自動更新されます。
+Copyright (c) 2026 Hidemi Ishihara
 
-各エージェントについて以下の情報が表示されます:
-
-- **セッション名**: tmuxセッション名
-- **役割**: エージェントの役職
-- **状態**: 稼働中 / 停止
-- **最新アクティビティ**: 各エージェントが現在行っている作業内容
-
-オプション:
-
-- `--interval <ms>` : 更新間隔をミリ秒で指定（デフォルト: 3000）
-
-```bash
-# 5秒間隔で更新
-pnpm run live -- --interval 5000
-```
-
-Ctrl+Cで終了。
-
-> **`monitor` との違い**: `monitor`はバックグラウンドでの正常性監視（異常検出時にログ出力）を行うのに対し、`live`は人間が視覚的に全エージェントの状況をリアルタイムで把握するためのダッシュボードです。
-
-### エージェントへの接続
-
-```bash
-# プロデューサーに接続
-tmux attach -t producer
-
-# ディレクターに接続
-tmux attach -t director
-
-# セッションからデタッチ: Ctrl+b d
-```
-
-### セッション一覧
-
-```bash
-tmux ls
-```
-
-## エージェント構成
-
-| 部門 | 役職 | セッション名 | 人数 |
-|------|------|--------------|------|
-| 統括 | プロデューサー | producer | 1 |
-| 統括 | ディレクター | director | 1 |
-| デザイン | リードデザイナー | lead_design | 1 |
-| デザイン | デザイナー | designer_1, designer_2 | 2 |
-| プログラム | リードプログラマー | lead_prog | 1 |
-| プログラム | プログラマー | programmer_1〜5 | 5 |
-| QA | QAリード | lead_qa | 1 |
-| QA | テスター | tester_1, tester_2 | 2 |
-| **合計** | | | **14** |
-
-## ディレクトリ構造
-
-```
-layers/
-├── .layers/                   # Layers固有コンテンツ統合ディレクトリ
-│   ├── src/                   # TypeScriptソースコード
-│   │   ├── index.ts           # CLIエントリーポイント
-│   │   ├── agents/            # エージェント管理
-│   │   │   ├── AgentManager.ts
-│   │   │   ├── types.ts
-│   │   │   └── index.ts
-│   │   ├── communication/     # メッセージング
-│   │   │   ├── MessageBroker.ts
-│   │   │   ├── TmuxTransport.ts
-│   │   │   ├── types.ts
-│   │   │   └── index.ts
-│   │   ├── tmux/              # tmux操作
-│   │   │   ├── TmuxController.ts
-│   │   │   ├── ShellExecutor.ts
-│   │   │   ├── types.ts
-│   │   │   └── index.ts
-│   │   ├── monitoring/        # 監視・ログ
-│   │   │   ├── Monitor.ts
-│   │   │   ├── Logger.ts
-│   │   │   └── index.ts
-│   │   └── config/
-│   │       └── agents.json    # エージェント設定
-│   ├── dist/                  # ビルド成果物（自動生成）
-│   ├── prompts/               # エージェントプロンプト
-│   │   ├── producer.md
-│   │   ├── director.md
-│   │   ├── lead_design.md
-│   │   ├── lead_prog.md
-│   │   ├── lead_qa.md
-│   │   ├── designer.md
-│   │   ├── programmer.md
-│   │   └── tester.md
-│   └── logs/                  # エージェント作業ログ（自動生成）
-├── logs/                      # システムログファイル
-├── package.json
-├── tsconfig.json
-├── pnpm-lock.yaml
-└── README.md
-```
-
-## 設定ファイル
-
-### agents.json
-
-各エージェントの設定は `.layers/src/config/agents.json` で管理されます。
-
-```json
-{
-  "sessionName": "producer",
-  "role": "producer",
-  "superior": null,
-  "subordinates": ["director"],
-  "promptFile": ".layers/prompts/producer.md",
-  "permissionMode": "dangerouslySkip"
-}
-```
-
-### エージェントプロンプト
-
-各エージェントの行動指針は `.layers/prompts/` 配下のMarkdownファイルで定義されています。
-
-## トラブルシューティング
-
-### セッションが起動しない
-
-```bash
-# tmuxの確認
-tmux -V
-
-# Claude Codeの確認
-claude --version
-
-# pnpmの確認
-pnpm --version
-```
-
-### メッセージが届かない
-
-```bash
-# セッションの確認
-tmux ls
-
-# 特定セッションの内容確認
-tmux capture-pane -t producer -p
-```
-
-### エージェントが応答しない
-
-```bash
-# セッションの再起動
-tmux kill-session -t <session_name>
-pnpm run start
-```
-
-### ビルドエラー
-
-```bash
-# node_modulesを再インストール
-rm -rf node_modules
-pnpm install
-
-# ビルド
-pnpm run build
-```
-
-## 技術的な制約
-
-### Claude Codeのbash実行制約
-
-Claude Codeがbashコマンドを実行する際、`;`や`&&`で連結された複数コマンドの後半が実行されない場合があります。
-
-**対策**: エージェントプロンプトでは、メッセージ送信とEnter送信を別々のbashコマンドブロックとして実行するよう指示しています。
-
-```bash
-# コマンド1: メッセージ送信
-tmux send-keys -t "target" 'メッセージ'
-```
-
-```bash
-# コマンド2: Enter送信（必ず別のbash実行で）
-tmux send-keys -t "target" Enter
-```
-
-## 注意事項
-
-- 14エージェント同時稼働は大量のAPI呼び出しを発生させます
-- 必要なエージェントのみを稼働させることを推奨します
-- `--dangerously-skip-permissions`の使用は本番環境では非推奨です
-- Anthropic APIには5時間あたりの利用制限があります
-
-## ライセンス
-
-MIT
->>>>>>> 53d59a608fda032808e9553c14f4ad5bd472b5c3
+詳細は [LICENSE](LICENSE) を参照。
